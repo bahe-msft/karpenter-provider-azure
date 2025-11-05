@@ -673,7 +673,7 @@ func (p *DefaultVMProvider) createVirtualMachine(ctx context.Context, opts *crea
 	vm := newVMObject(opts)
 	log.FromContext(ctx).V(1).Info("creating virtual machine", "vmName", opts.VMName, logging.InstanceType, opts.InstanceType.Name)
 	enc := json.NewEncoder(os.Stderr)
-	enc.SetIndent("", "  ")
+	enc.SetIndent("<debug vm object>", "  ")
 	_ = enc.Encode(vm)
 
 	VMCreateStartMetric.With(map[string]string{
