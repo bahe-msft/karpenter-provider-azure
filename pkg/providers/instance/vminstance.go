@@ -764,7 +764,7 @@ func (p *DefaultVMProvider) beginLaunchInstance(
 	}
 
 	var extraNicReferences []string
-	for i := 1; i < 2; i++ {
+	for i := 1; i < 3; i++ {
 		extraNicName := fmt.Sprintf("%s-%02d", resourceName, i)
 		extraNicRef, err := p.createNetworkInterface(
 			ctx,
