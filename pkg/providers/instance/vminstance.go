@@ -18,9 +18,11 @@ package instance
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"time"
 
 	sdkerrors "github.com/Azure/azure-sdk-for-go-extensions/pkg/errors"
@@ -501,6 +503,8 @@ type createVMOptions struct {
 	UseSIG              bool
 	DiskEncryptionSetID string
 	NodePoolName        string
+
+	ExtraNicReferences []string
 }
 
 // newVMObject creates a new armcompute.VirtualMachine from the provided options
@@ -564,6 +568,17 @@ func newVMObject(opts *createVMOptions) *armcompute.VirtualMachine {
 	setImageReference(vm.Properties, opts.LaunchTemplate.ImageID, opts.UseSIG)
 	setVMPropertiesBillingProfile(vm.Properties, opts.CapacityType)
 	setVMPropertiesSecurityProfile(vm.Properties, opts.NodeClass)
+
+	for _, extraNicRef := range opts.ExtraNicReferences {
+		extraNic := &armcompute.NetworkInterfaceReference{
+			ID: lo.ToPtr(extraNicRef),
+			Properties: &armcompute.NetworkInterfaceReferenceProperties{
+				Primary: lo.ToPtr(false),
+				DeleteOption: lo.ToPtr(armcompute.DeleteOptionsDelete),
+			},
+		}
+		vm.Properties.NetworkProfile.NetworkInterfaces = append(vm.Properties.NetworkProfile.NetworkInterfaces, extraNic)
+	}
 
 	if opts.ProvisionMode == consts.ProvisionModeBootstrappingClient {
 		vm.Properties.OSProfile.CustomData = lo.ToPtr(opts.LaunchTemplate.CustomScriptsCustomData)
@@ -657,6 +672,10 @@ func (p *DefaultVMProvider) createVirtualMachine(ctx context.Context, opts *crea
 	}
 	vm := newVMObject(opts)
 	log.FromContext(ctx).V(1).Info("creating virtual machine", "vmName", opts.VMName, logging.InstanceType, opts.InstanceType.Name)
+	enc := json.NewEncoder(os.Stderr)
+	enc.SetIndent("", "  ")
+	_ = enc.Encode(vm)
+
 	VMCreateStartMetric.With(map[string]string{
 		metrics.ImageLabel:        opts.LaunchTemplate.ImageID,
 		metrics.SizeLabel:         opts.InstanceType.Name,
@@ -744,6 +763,28 @@ func (p *DefaultVMProvider) beginLaunchInstance(
 		return nil, err
 	}
 
+	var extraNicReferences []string
+	for i := 1; i < 2; i++ {
+		extraNicName := fmt.Sprintf("%s-%02d", resourceName, i)
+		extraNicRef, err := p.createNetworkInterface(
+			ctx,
+			&createNICOptions{
+				NICName:                extraNicName,
+				NetworkPlugin:          networkPlugin,
+				NetworkPluginMode:      networkPluginMode,
+				MaxPods:                utils.GetMaxPods(nodeClass, networkPlugin, networkPluginMode),
+				LaunchTemplate:         launchTemplate,
+				BackendPools:           backendPools,
+				InstanceType:           instanceType,
+				NetworkSecurityGroupID: nsgID,
+			},
+		)
+		if err != nil {
+			return nil, err
+		}
+		extraNicReferences = append(extraNicReferences, extraNicRef)
+	}
+
 	result, err := p.createVirtualMachine(ctx, &createVMOptions{
 		VMName:              resourceName,
 		NicReference:        nicReference,
@@ -760,6 +801,7 @@ func (p *DefaultVMProvider) beginLaunchInstance(
 		UseSIG:              options.FromContext(ctx).UseSIG,
 		DiskEncryptionSetID: p.diskEncryptionSetID,
 		NodePoolName:        nodeClaim.Labels[karpv1.NodePoolLabelKey],
+		ExtraNicReferences:  extraNicReferences,
 	})
 	if err != nil {
 		sku, skuErr := p.instanceTypeProvider.Get(ctx, nodeClass, instanceType.Name)
