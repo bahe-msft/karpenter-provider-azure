@@ -33,5 +33,8 @@ func init() {
 	scheme.Scheme.AddKnownTypes(gv,
 		&AKSNodeClass{},
 		&AKSNodeClassList{},
+
+		&StretchNebiusNodeClass{},
+		&StretchNebiusNodeClassList{},
 	)
 }
