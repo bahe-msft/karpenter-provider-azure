@@ -26,6 +26,9 @@ help: ## Display help
 ko: ## Build and publish Karpenter using ko
 	KO_DOCKER_REPO=${KO_DOCKER_REPO} ko publish -B -t "${KO_TAG}" ./cmd/controller
 
+controller-gen:
+	controller-gen paths="./..." object:headerFile="hack/boilerplate.go.txt"
+
 presubmit: verify test ## Run all steps in the developer loop
 
 ci-test: test coverage ## Runs tests and submits coverage
