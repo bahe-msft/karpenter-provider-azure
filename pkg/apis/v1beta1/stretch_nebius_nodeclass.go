@@ -17,9 +17,28 @@ type StretchNebiusNodeClass struct {
 	// +optional
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
+	// +optional
+	Spec StretchNebiusNodeClassSpec `json:"spec,omitempty"`
+
 	// status contains the resolved state of the StretchNebiusNodeClass.
 	// +optional
 	Status StretchNebiusNodeClassStatus `json:"status,omitempty"`
+}
+
+type StretchNebiusNodeClassSpec struct {
+	// SubnetID is the nebius subnet id to launch nodes in.
+	// Node will be auto-assigned an IP from this subnet.
+	// +required
+	SubnetID string `json:"subnetID,omitempty"`
+	// OSDiskSizeGB is the size of the OS disk in GB.
+	// +default=128
+	// +optional
+	OSDiskSizeGB *int32 `json:"osDiskSizeGB,omitempty"`
+	// +default=ubuntu24.04-driverless
+	// +optional
+	OSDiskImageFamily *string `json:"osDiskImageFamily,omitempty"`
+
+	// TODO: other fields (kublet etc)
 }
 
 type StretchNebiusNodeClassStatus struct {
