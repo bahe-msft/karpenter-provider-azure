@@ -3,4 +3,4 @@ defaultPlatforms:
   # - linux/arm64
   - linux/amd64
 defaultEnv:
-  - CGO_ENABLED=1
+  - CGO_ENABLED=0 # disabling as we don't need fips for now
