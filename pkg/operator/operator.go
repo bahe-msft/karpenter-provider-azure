@@ -309,6 +309,7 @@ func WaitForCRDs(ctx context.Context, timeout time.Duration, config *rest.Config
 		gvk(&karpv1.NodePool{}),
 		gvk(&karpv1.NodeClaim{}),
 		gvk(&v1beta1.AKSNodeClass{}),
+		gvk(&v1beta1.StretchNebiusNodeClass{}),
 	}
 
 	client, err := rest.HTTPClientFor(config)

@@ -25,6 +25,7 @@ import (
 	"github.com/Azure/karpenter-provider-azure/pkg/cloudprovider"
 	"github.com/Azure/karpenter-provider-azure/pkg/controllers"
 	"github.com/Azure/karpenter-provider-azure/pkg/operator"
+	stretchcontrollers "github.com/Azure/karpenter-provider-azure/pkg/stretch/controllers"
 	"github.com/go-logr/zapr"
 	"github.com/samber/lo"
 
@@ -90,6 +91,10 @@ func main() {
 			op.ImageProvider,
 			op.InClusterKubernetesInterface,
 			op.AZClient.SubnetsClient(),
+		)...).
+		WithControllers(ctx, stretchcontrollers.NewControllers(
+			ctx,
+			op.GetClient(),
 		)...).
 		Start(ctx)
 }
