@@ -25,16 +25,18 @@ import (
 	"github.com/Azure/karpenter-provider-azure/pkg/cloudprovider"
 	"github.com/Azure/karpenter-provider-azure/pkg/controllers"
 	"github.com/Azure/karpenter-provider-azure/pkg/operator"
+
 	stretchcloudproviders "github.com/Azure/karpenter-provider-azure/pkg/stretch/cloudproviders"
 	stretchnebiuscloudprovider "github.com/Azure/karpenter-provider-azure/pkg/stretch/cloudproviders/nebius"
 	stretchcontrollers "github.com/Azure/karpenter-provider-azure/pkg/stretch/controllers"
+	stretchoptions "github.com/Azure/karpenter-provider-azure/pkg/stretch/options"
+
 	"github.com/go-logr/zapr"
 	"github.com/samber/lo"
 
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	"github.com/Azure/karpenter-provider-azure/pkg/operator/options"
-	corecloudprovider "sigs.k8s.io/karpenter/pkg/cloudprovider"
 	"sigs.k8s.io/karpenter/pkg/cloudprovider/metrics"
 	"sigs.k8s.io/karpenter/pkg/cloudprovider/overlay"
 	corecontrollers "sigs.k8s.io/karpenter/pkg/controllers"
@@ -66,17 +68,17 @@ func main() {
 
 	lo.Must0(op.AddHealthzCheck("cloud-provider", aksCloudProvider.LivenessProbe))
 
-	var (
-		overlayUndecoratedCloudProvider corecloudprovider.CloudProvider
-		cloudProvider                   corecloudprovider.CloudProvider
-	)
-	{
-		delegatedCloudProvider := stretchcloudproviders.New(aksCloudProvider)
-		stretchnebiuscloudprovider.Register(delegatedCloudProvider)
+	delegatedCloudProvider := stretchcloudproviders.New(aksCloudProvider)
 
-		overlayUndecoratedCloudProvider = metrics.Decorate(delegatedCloudProvider)
-		cloudProvider = overlay.Decorate(overlayUndecoratedCloudProvider, op.GetClient(), op.InstanceTypeStore)
+	// nebius cloud provider
+	{
+		nebiusSDK := stretchoptions.MustNewNebiusSDK(ctx)
+		defer nebiusSDK.Close()
+		stretchnebiuscloudprovider.Register(delegatedCloudProvider, nebiusSDK)
 	}
+
+	overlayUndecoratedCloudProvider := metrics.Decorate(delegatedCloudProvider)
+	cloudProvider := overlay.Decorate(overlayUndecoratedCloudProvider, op.GetClient(), op.InstanceTypeStore)
 
 	clusterState := state.NewCluster(op.Clock, op.GetClient(), cloudProvider)
 	op.
