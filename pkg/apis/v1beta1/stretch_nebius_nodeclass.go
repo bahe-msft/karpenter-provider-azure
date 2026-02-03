@@ -34,7 +34,7 @@ type StretchNebiusNodeClassSpec struct {
 	// +default=128
 	// +optional
 	OSDiskSizeGB *int32 `json:"osDiskSizeGB,omitempty"`
-	// +default=ubuntu24.04-driverless
+	// +default="ubuntu24.04-driverless"
 	// +optional
 	OSDiskImageFamily *string `json:"osDiskImageFamily,omitempty"`
 

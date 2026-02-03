@@ -20,19 +20,24 @@ import (
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
-
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/karpenter/pkg/events"
 
-	"github.com/Azure/karpenter-provider-azure/pkg/apis/v1beta1"
 	"github.com/Azure/karpenter-provider-azure/pkg/utils"
 )
 
-func WaitingOnNodeClaimTerminationEvent(nodeClass *v1beta1.AKSNodeClass, names []string) events.Event {
+type RuntimeObjectWithUID interface {
+	runtime.Object
+	GetUID() types.UID
+}
+
+func WaitingOnNodeClaimTerminationEvent(nodeClass RuntimeObjectWithUID, names []string) events.Event {
 	return events.Event{
 		InvolvedObject: nodeClass,
 		Type:           corev1.EventTypeNormal,
 		Reason:         "WaitingOnNodeClaimTermination",
 		Message:        fmt.Sprintf("Waiting on NodeClaim termination for %s", utils.PrettySlice(names, 5)),
-		DedupeValues:   []string{string(nodeClass.UID)},
+		DedupeValues:   []string{string(nodeClass.GetUID())},
 	}
 }

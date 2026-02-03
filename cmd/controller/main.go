@@ -95,6 +95,7 @@ func main() {
 		WithControllers(ctx, stretchcontrollers.NewControllers(
 			ctx,
 			op.GetClient(),
+			op.EventRecorder,
 		)...).
 		Start(ctx)
 }
