@@ -72,7 +72,7 @@ func (c *CloudProvider) GetInstanceTypes(
 		}
 
 		for _, preset := range item.GetSpec().GetPresets() {
-			logger.Info(
+			logger.V(8).Info(
 				"found nebius platform preset",
 				"platform.id", item.GetMetadata().GetId(),
 				"platform.name", item.GetMetadata().GetName(),
@@ -83,10 +83,22 @@ func (c *CloudProvider) GetInstanceTypes(
 				"preset.gpu_count", preset.GetResources().GetGpuCount(),
 			)
 
+			vcpusCount := fmt.Sprint(preset.GetResources().GetVcpuCount())
+			memoryGiB := fmt.Sprint(preset.GetResources().GetMemoryGibibytes())
+			memoryMiB := fmt.Sprint(preset.GetResources().GetMemoryGibibytes() * 1024)
+			gpuCount := fmt.Sprint(preset.GetResources().GetGpuCount())
+
 			instanceType := &corecloudprovider.InstanceType{
 				// FIXME: confirm naming convention
-				Name:         fmt.Sprintf("%s-%s", item.GetMetadata().GetName(), preset.GetName()),
-				Requirements: scheduling.NewRequirements(),
+				Name: fmt.Sprintf("%s-%s", item.GetMetadata().GetName(), preset.GetName()),
+				Requirements: scheduling.NewRequirements(
+					scheduling.NewRequirement(
+						corev1.LabelOSStable, corev1.NodeSelectorOpIn, string(corev1.Linux),
+					),
+					scheduling.NewRequirement(v1beta1.LabelSKUCPU, corev1.NodeSelectorOpIn, vcpusCount),
+					scheduling.NewRequirement(v1beta1.LabelSKUMemory, corev1.NodeSelectorOpIn, memoryMiB),
+					scheduling.NewRequirement(v1beta1.LabelSKUGPUCount, corev1.NodeSelectorOpIn, gpuCount),
+				),
 				Offerings: corecloudprovider.Offerings{
 					{
 						Price:     1000, // FIXME: calculate real price
@@ -94,11 +106,11 @@ func (c *CloudProvider) GetInstanceTypes(
 					},
 				},
 				Capacity: corev1.ResourceList{
-					corev1.ResourceCPU:                    *resources.Quantity(fmt.Sprint(preset.GetResources().GetVcpuCount())),
-					corev1.ResourceMemory:                 *resources.Quantity(fmt.Sprint(preset.GetResources().GetMemoryGibibytes())),
+					corev1.ResourceCPU:                    *resources.Quantity(vcpusCount),
+					corev1.ResourceMemory:                 *resources.Quantity(memoryGiB),
 					corev1.ResourceEphemeralStorage:       *resource.NewScaledQuantity(100, resource.Giga), // FIXME: read from node class
 					corev1.ResourcePods:                   *resources.Quantity("110"),                      // FIXME: read from node class
-					corev1.ResourceName("nvidia.com/gpu"): *resources.Quantity(fmt.Sprint(preset.GetResources().GetGpuCount())),
+					corev1.ResourceName("nvidia.com/gpu"): *resources.Quantity(gpuCount),
 				},
 				Overhead: &corecloudprovider.InstanceTypeOverhead{
 					KubeReserved: instancetype.KubeReservedResources(
