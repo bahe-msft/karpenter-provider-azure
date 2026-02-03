@@ -25,6 +25,8 @@ import (
 	"github.com/Azure/karpenter-provider-azure/pkg/cloudprovider"
 	"github.com/Azure/karpenter-provider-azure/pkg/controllers"
 	"github.com/Azure/karpenter-provider-azure/pkg/operator"
+	stretchcloudproviders "github.com/Azure/karpenter-provider-azure/pkg/stretch/cloudproviders"
+	stretchnebiuscloudprovider "github.com/Azure/karpenter-provider-azure/pkg/stretch/cloudproviders/nebius"
 	stretchcontrollers "github.com/Azure/karpenter-provider-azure/pkg/stretch/controllers"
 	"github.com/go-logr/zapr"
 	"github.com/samber/lo"
@@ -32,6 +34,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	"github.com/Azure/karpenter-provider-azure/pkg/operator/options"
+	corecloudprovider "sigs.k8s.io/karpenter/pkg/cloudprovider"
 	"sigs.k8s.io/karpenter/pkg/cloudprovider/metrics"
 	"sigs.k8s.io/karpenter/pkg/cloudprovider/overlay"
 	corecontrollers "sigs.k8s.io/karpenter/pkg/controllers"
@@ -63,10 +66,19 @@ func main() {
 
 	lo.Must0(op.AddHealthzCheck("cloud-provider", aksCloudProvider.LivenessProbe))
 
-	overlayUndecoratedCloudProvider := metrics.Decorate(aksCloudProvider)
-	cloudProvider := overlay.Decorate(overlayUndecoratedCloudProvider, op.GetClient(), op.InstanceTypeStore)
-	clusterState := state.NewCluster(op.Clock, op.GetClient(), cloudProvider)
+	var (
+		overlayUndecoratedCloudProvider corecloudprovider.CloudProvider
+		cloudProvider                   corecloudprovider.CloudProvider
+	)
+	{
+		delegatedCloudProvider := stretchcloudproviders.New(aksCloudProvider)
+		stretchnebiuscloudprovider.Register(delegatedCloudProvider)
 
+		overlayUndecoratedCloudProvider = metrics.Decorate(delegatedCloudProvider)
+		cloudProvider = overlay.Decorate(overlayUndecoratedCloudProvider, op.GetClient(), op.InstanceTypeStore)
+	}
+
+	clusterState := state.NewCluster(op.Clock, op.GetClient(), cloudProvider)
 	op.
 		WithControllers(ctx, corecontrollers.NewControllers(
 			ctx,

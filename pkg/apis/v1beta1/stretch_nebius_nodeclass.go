@@ -25,6 +25,22 @@ type StretchNebiusNodeClass struct {
 	Status StretchNebiusNodeClassStatus `json:"status,omitempty"`
 }
 
+var _ status.Object = (*StretchNebiusNodeClass)(nil)
+
+func (s *StretchNebiusNodeClass) GetConditions() []status.Condition {
+	return s.Status.Conditions
+}
+
+func (s *StretchNebiusNodeClass) SetConditions(conditions []status.Condition) {
+	s.Status.Conditions = conditions
+}
+
+func (s *StretchNebiusNodeClass) StatusConditions() status.ConditionSet {
+	conds := []string{}
+
+	return status.NewReadyConditions(conds...).For(s)
+}
+
 type StretchNebiusNodeClassSpec struct {
 	// SubnetID is the nebius subnet id to launch nodes in.
 	// Node will be auto-assigned an IP from this subnet.
