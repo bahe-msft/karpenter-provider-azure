@@ -80,9 +80,20 @@ func (p *platformPreset) ToInstanceType() *corecloudprovider.InstanceType {
 }
 
 func (p *platformPreset) IsCheaperThan(other *platformPreset) bool {
-	// Lazy implementation to assume price is based on vCPU count
+	// Lazy implementation to assume price is based on vCPU count & memory
 	// FIXME: calculate based on real price
-	return p.preset.GetResources().GetVcpuCount() < other.preset.GetResources().GetVcpuCount()
+	pVCPUCount := p.preset.GetResources().GetVcpuCount()
+	otherVCPUCount := other.preset.GetResources().GetVcpuCount()
+
+	if pVCPUCount < otherVCPUCount {
+		return true
+	}
+	if pVCPUCount == otherVCPUCount {
+		pMemory := p.preset.GetResources().GetMemoryGibibytes()
+		otherMemory := other.preset.GetResources().GetMemoryGibibytes()
+		return pMemory < otherMemory
+	}
+	return false
 }
 
 func (p *platformPreset) DeepClone() *platformPreset {
