@@ -83,8 +83,9 @@ func (c *CloudProvider) GetInstanceTypes(
 				"preset.gpu_count", preset.GetResources().GetGpuCount(),
 			)
 
+			// TODO: fix this mess
 			vcpusCount := fmt.Sprint(preset.GetResources().GetVcpuCount())
-			memoryGiB := fmt.Sprint(preset.GetResources().GetMemoryGibibytes())
+			memoryGiB := fmt.Sprintf("%dGi", preset.GetResources().GetMemoryGibibytes())
 			memoryMiB := fmt.Sprint(preset.GetResources().GetMemoryGibibytes() * 1024)
 			gpuCount := fmt.Sprint(preset.GetResources().GetGpuCount())
 
@@ -100,9 +101,13 @@ func (c *CloudProvider) GetInstanceTypes(
 					scheduling.NewRequirement(v1beta1.LabelSKUGPUCount, corev1.NodeSelectorOpIn, gpuCount),
 				),
 				Offerings: corecloudprovider.Offerings{
+					// FIXME: determine real availability zones from Nebius platform data
 					{
 						Price:     1000, // FIXME: calculate real price
 						Available: true,
+						Requirements: scheduling.NewRequirements(
+							scheduling.NewRequirement(v1.CapacityTypeLabelKey, corev1.NodeSelectorOpIn, v1.CapacityTypeOnDemand),
+						),
 					},
 				},
 				Capacity: corev1.ResourceList{
