@@ -2,52 +2,124 @@ package nebius
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	"github.com/awslabs/operatorpkg/status"
 	"github.com/nebius/gosdk"
-	nebiuscomputev1 "github.com/nebius/gosdk/proto/nebius/compute/v1"
-	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/rest"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	v1 "sigs.k8s.io/karpenter/pkg/apis/v1"
 	corecloudprovider "sigs.k8s.io/karpenter/pkg/cloudprovider"
-	"sigs.k8s.io/karpenter/pkg/scheduling"
-	"sigs.k8s.io/karpenter/pkg/utils/resources"
 
+	"github.com/Azure/karpenter-provider-azure/pkg/apis"
 	"github.com/Azure/karpenter-provider-azure/pkg/apis/v1beta1"
-	"github.com/Azure/karpenter-provider-azure/pkg/providers/instancetype"
 	"github.com/Azure/karpenter-provider-azure/pkg/stretch/cloudproviders"
 	"github.com/Azure/karpenter-provider-azure/pkg/stretch/options"
+	"github.com/Azure/karpenter-provider-azure/pkg/utils"
 )
 
 type CloudProvider struct {
-	sdk *gosdk.SDK
+	sdk        *gosdk.SDK
+	kubeClient client.Client
+	restConfig *rest.Config
 }
 
 var _ corecloudprovider.CloudProvider = (*CloudProvider)(nil)
 
-func new(sdk *gosdk.SDK) *CloudProvider {
-	return &CloudProvider{sdk: sdk}
+func new(
+	sdk *gosdk.SDK,
+	kubeClient client.Client,
+	restConfig *rest.Config,
+) *CloudProvider {
+	return &CloudProvider{
+		sdk:        sdk,
+		kubeClient: kubeClient,
+		restConfig: restConfig,
+	}
 }
 
 func Register(
 	d *cloudproviders.DelegatedCloudProvider,
 	sdk *gosdk.SDK,
+	kubeClient client.Client,
+	restConfig *rest.Config,
 ) {
-	d.RegisterKind("StretchNebiusNodeClass", new(sdk))
+	d.RegisterKind("StretchNebiusNodeClass", new(sdk, kubeClient, restConfig))
 }
 
-func (c *CloudProvider) Create(context.Context, *v1.NodeClaim) (*v1.NodeClaim, error) {
-	panic("unimplemented")
+func (c *CloudProvider) getNodeClass( // TODO: make it reusable
+	ctx context.Context,
+	nodeClaim *v1.NodeClaim,
+) (*v1beta1.StretchNebiusNodeClass, error) {
+	if nodeClaim.Spec.NodeClassRef == nil {
+		return nil, fmt.Errorf("nodeClaim %s does not have a nodeClassRef", nodeClaim.Name)
+	}
+
+	rv := &v1beta1.StretchNebiusNodeClass{}
+	if err := c.kubeClient.Get(ctx, client.ObjectKey{Name: nodeClaim.Spec.NodeClassRef.Name}, rv); err != nil {
+		return nil, fmt.Errorf("getting StretchNebiusNodeClass %s: %w", nodeClaim.Spec.NodeClassRef.Name, err)
+	}
+
+	if !rv.DeletionTimestamp.IsZero() {
+		return nil, utils.NewTerminatingResourceError(schema.GroupResource{Group: apis.Group, Resource: "nebiusnodeclass"}, rv.Name)
+	}
+
+	return rv, nil
 }
 
-func (c *CloudProvider) Delete(context.Context, *v1.NodeClaim) error {
-	panic("unimplemented")
+func (c *CloudProvider) Create(ctx context.Context, nodeClaim *v1.NodeClaim) (*v1.NodeClaim, error) {
+	logger := log.FromContext(ctx).WithValues("nodeClaim", nodeClaim.Name)
+	logger.Info("creating nebius VM for nodeClaim")
+
+	nodeClass, err := c.getNodeClass(ctx, nodeClaim)
+	if err != nil {
+		// FIXME: proper error attribution
+		return nil, err
+	}
+
+	// resolve instance type to use based on pricing/offerings
+	platformPresetToLaunch, err := resolvePlatformPresetFromNodeClaim(
+		ctx,
+		options.MustGetNebiusProjectID(ctx), // TODO: maybe resolve from node class?
+		c.sdk,
+		nodeClaim,
+	)
+	if err != nil {
+		return nil, err
+	}
+	logger.Info("resolved platform preset for launching instance", "platformPreset", platformPresetToLaunch.InstanceTypeName())
+
+	// launch nebius instance
+	instanceConfig, err := newVMInstanceConfig(
+		ctx,
+		nodeClass,
+		nodeClaim,
+		platformPresetToLaunch,
+		c.restConfig,
+	)
+	if err != nil {
+		return nil, err
+	}
+	instance := newVMInstance(instanceConfig, c.sdk)
+	_ = instance
+
+	b, _ := json.MarshalIndent(instanceConfig, "", "  ")
+	fmt.Println("instanceConfig:\n", string(b))
+
+	// populate nodeClaim status to bookkeep the created VM (provider ID)
+
+	panic("create unimplemented")
 }
 
-func (c *CloudProvider) Get(context.Context, string) (*v1.NodeClaim, error) {
-	panic("unimplemented")
+func (c *CloudProvider) Delete(ctx context.Context, nodeClaim *v1.NodeClaim) error {
+	panic("delete unimplemented")
+}
+
+func (c *CloudProvider) Get(ctx context.Context, providerID string) (*v1.NodeClaim, error) {
+	panic("get unimplemented")
 }
 
 func (c *CloudProvider) GetInstanceTypes(
@@ -61,77 +133,25 @@ func (c *CloudProvider) GetInstanceTypes(
 		WithName("nebius-cloud-provider").
 		WithValues("nebius.project-id", projectID)
 
-	req := &nebiuscomputev1.ListPlatformsRequest{
-		ParentId: projectID,
-	}
-
 	var rv []*corecloudprovider.InstanceType
-	for item, err := range c.sdk.Services().Compute().V1().Platform().Filter(ctx, req) {
+	for platformPreset, err := range filterPlatformPresets(ctx, projectID, c.sdk) {
 		if err != nil {
 			return nil, fmt.Errorf("filter supported platforms from %q: %w", projectID, err)
 		}
+		platform := platformPreset.platform
+		preset := platformPreset.preset
+		logger.V(8).Info(
+			"found nebius platform preset",
+			"platform.id", platform.GetMetadata().GetId(),
+			"platform.name", platform.GetMetadata().GetName(),
+			"platform.human_readable_name", platform.GetSpec().GetHumanReadableName(),
+			"preset.name", preset.GetName(),
+			"preset.vcpu_count", preset.GetResources().GetVcpuCount(),
+			"preset.memory_gb", preset.GetResources().GetMemoryGibibytes(),
+			"preset.gpu_count", preset.GetResources().GetGpuCount(),
+		)
 
-		for _, preset := range item.GetSpec().GetPresets() {
-			logger.V(8).Info(
-				"found nebius platform preset",
-				"platform.id", item.GetMetadata().GetId(),
-				"platform.name", item.GetMetadata().GetName(),
-				"platform.human_readable_name", item.GetSpec().GetHumanReadableName(),
-				"preset.name", preset.GetName(),
-				"preset.vcpu_count", preset.GetResources().GetVcpuCount(),
-				"preset.memory_gb", preset.GetResources().GetMemoryGibibytes(),
-				"preset.gpu_count", preset.GetResources().GetGpuCount(),
-			)
-
-			// TODO: fix this mess
-			vcpusCount := fmt.Sprint(preset.GetResources().GetVcpuCount())
-			memoryGiB := fmt.Sprintf("%dGi", preset.GetResources().GetMemoryGibibytes())
-			memoryMiB := fmt.Sprint(preset.GetResources().GetMemoryGibibytes() * 1024)
-			gpuCount := fmt.Sprint(preset.GetResources().GetGpuCount())
-
-			instanceType := &corecloudprovider.InstanceType{
-				// FIXME: confirm naming convention
-				Name: fmt.Sprintf("%s-%s", item.GetMetadata().GetName(), preset.GetName()),
-				Requirements: scheduling.NewRequirements(
-					scheduling.NewRequirement(
-						corev1.LabelOSStable, corev1.NodeSelectorOpIn, string(corev1.Linux),
-					),
-					scheduling.NewRequirement(v1beta1.LabelSKUCPU, corev1.NodeSelectorOpIn, vcpusCount),
-					scheduling.NewRequirement(v1beta1.LabelSKUMemory, corev1.NodeSelectorOpIn, memoryMiB),
-					scheduling.NewRequirement(v1beta1.LabelSKUGPUCount, corev1.NodeSelectorOpIn, gpuCount),
-				),
-				Offerings: corecloudprovider.Offerings{
-					// FIXME: determine real availability zones from Nebius platform data
-					{
-						Price:     1000, // FIXME: calculate real price
-						Available: true,
-						Requirements: scheduling.NewRequirements(
-							scheduling.NewRequirement(v1.CapacityTypeLabelKey, corev1.NodeSelectorOpIn, v1.CapacityTypeOnDemand),
-						),
-					},
-				},
-				Capacity: corev1.ResourceList{
-					corev1.ResourceCPU:                    *resources.Quantity(vcpusCount),
-					corev1.ResourceMemory:                 *resources.Quantity(memoryGiB),
-					corev1.ResourceEphemeralStorage:       *resource.NewScaledQuantity(100, resource.Giga), // FIXME: read from node class
-					corev1.ResourcePods:                   *resources.Quantity("110"),                      // FIXME: read from node class
-					corev1.ResourceName("nvidia.com/gpu"): *resources.Quantity(gpuCount),
-				},
-				Overhead: &corecloudprovider.InstanceTypeOverhead{
-					KubeReserved: instancetype.KubeReservedResources(
-						int64(preset.Resources.VcpuCount),
-						float64(preset.Resources.MemoryGibibytes),
-					),
-					SystemReserved: corev1.ResourceList{
-						corev1.ResourceCPU:    resource.Quantity{},
-						corev1.ResourceMemory: resource.Quantity{},
-					},
-					EvictionThreshold: instancetype.EvictionThreshold(),
-				},
-			}
-
-			rv = append(rv, instanceType)
-		}
+		rv = append(rv, platformPreset.ToInstanceType())
 	}
 
 	return rv, nil
@@ -143,11 +163,11 @@ func (c *CloudProvider) GetSupportedNodeClasses() []status.Object {
 	}
 }
 
-func (c *CloudProvider) IsDrifted(context.Context, *v1.NodeClaim) (corecloudprovider.DriftReason, error) {
-	panic("unimplemented")
+func (c *CloudProvider) IsDrifted(ctx context.Context, nodeClaim *v1.NodeClaim) (corecloudprovider.DriftReason, error) {
+	panic("isDrifted unimplemented")
 }
 
-func (c *CloudProvider) List(context.Context) ([]*v1.NodeClaim, error) {
+func (c *CloudProvider) List(ctx context.Context) ([]*v1.NodeClaim, error) {
 	// TODO: list nebius VMs and map to NodeClaims
 	return []*v1.NodeClaim{}, nil
 }

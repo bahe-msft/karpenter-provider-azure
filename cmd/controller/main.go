@@ -74,7 +74,7 @@ func main() {
 	{
 		nebiusSDK := stretchoptions.MustNewNebiusSDK(ctx)
 		defer nebiusSDK.Close()
-		stretchnebiuscloudprovider.Register(delegatedCloudProvider, nebiusSDK)
+		stretchnebiuscloudprovider.Register(delegatedCloudProvider, nebiusSDK, op.GetClient(), op.GetConfig())
 	}
 
 	overlayUndecoratedCloudProvider := metrics.Decorate(delegatedCloudProvider)
