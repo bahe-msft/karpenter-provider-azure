@@ -48,6 +48,24 @@ spec:
             type: string
           metadata:
             type: object
+          spec:
+            properties:
+              osDiskImageFamily:
+                default: ubuntu24.04-driverless
+                type: string
+              osDiskSizeGB:
+                default: 128
+                description: OSDiskSizeGB is the size of the OS disk in GB.
+                format: int32
+                type: integer
+              subnetID:
+                description: |-
+                  SubnetID is the nebius subnet id to launch nodes in.
+                  Node will be auto-assigned an IP from this subnet.
+                type: string
+            required:
+            - subnetID
+            type: object
           status:
             description: status contains the resolved state of the StretchNebiusNodeClass.
             properties:
