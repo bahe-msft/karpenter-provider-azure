@@ -36,7 +36,9 @@ func (s *StretchNebiusNodeClass) SetConditions(conditions []status.Condition) {
 }
 
 func (s *StretchNebiusNodeClass) StatusConditions() status.ConditionSet {
-	conds := []string{}
+	conds := []string{
+		ConditionTypeValidationSucceeded,
+	}
 
 	return status.NewReadyConditions(conds...).For(s)
 }

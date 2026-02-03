@@ -2,6 +2,7 @@ package nebius
 
 import (
 	"context"
+	"fmt"
 
 	opcontroller "github.com/awslabs/operatorpkg/controller"
 	"github.com/awslabs/operatorpkg/reasonable"
@@ -66,11 +67,14 @@ func (c *NodeClassStatusController) Reconcile(
 
 	// TODO: validation and other preparation logic
 
+	// set ready
+	future.StatusConditions().SetTrue(v1beta1.ConditionTypeValidationSucceeded)
+
 	if !equality.Semantic.DeepEqual(existing, future) {
 		// We use client.MergeFromWithOptimisticLock because patching a list with a JSON merge patch
 		// can cause races due to the fact that it fully replaces the list on a change
 		// Here, we are updating the status condition list
-		if err := c.kubeClient.Patch(ctx, future, client.MergeFrom(existing)); err != nil {
+		if err := c.kubeClient.Status().Patch(ctx, future, client.MergeFrom(existing)); err != nil {
 			return reconcile.Result{}, err
 		}
 	}
@@ -87,6 +91,11 @@ func (c *NodeClassStatusController) ensureFinalizer(
 	}
 
 	controllerutil.AddFinalizer(nodeClass, v1beta1.TerminationFinalizer)
+
+	// a patch is needed here to update the annotations
+	if err := c.kubeClient.Patch(ctx, nodeClass, client.MergeFrom(nodeClass)); err != nil {
+		return fmt.Errorf("patch finalizer: %w", err)
+	}
 
 	return nil
 }
