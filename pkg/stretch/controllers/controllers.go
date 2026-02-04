@@ -8,6 +8,7 @@ import (
 	"sigs.k8s.io/karpenter/pkg/events"
 
 	"github.com/Azure/karpenter-provider-azure/pkg/stretch/controllers/nebius"
+	"github.com/Azure/karpenter-provider-azure/pkg/stretch/controllers/nodes"
 )
 
 func NewControllers(
@@ -19,5 +20,7 @@ func NewControllers(
 		// TODO: implement node class hash logic for drift detection/reconciliation
 		nebius.NewNodeClassStatusController(kubeClient),
 		nebius.NewNodeClassTerminationController(kubeClient, recorder),
+
+		nodes.NewProviderIDController(kubeClient),
 	}
 }

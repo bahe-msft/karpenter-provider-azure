@@ -2,6 +2,7 @@ package userdata
 
 import (
 	_ "embed"
+	"strings"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -31,8 +32,9 @@ func init() {
 func UserData(
 	opts *options.Options,
 	aksClusterRestConfig *rest.Config,
+	extraNodeLabels []string,
 ) (*cloudinit.UserData, error) {
-	joinconfig, err := joinConfig(opts)
+	joinconfig, err := joinConfig(opts, extraNodeLabels)
 	if err != nil {
 		return nil, err
 	}
@@ -60,6 +62,10 @@ func UserData(
 		[]string{"kubeadm", "join", "--config", "/root/joinconfig"},
 		[]string{"rm", "-rf", "/root/.kube", "/root/joinconfig"},
 	)
+
+	if opts.SSHPublicKey != "" {
+		ud.SSHAuthorizedKeys = append(ud.SSHAuthorizedKeys, opts.SSHPublicKey)
+	}
 
 	return ud, nil
 }
@@ -90,7 +96,13 @@ func bootstrapKubeConfig(
 	})
 }
 
-func joinConfig(opts *options.Options) ([]byte, error) {
+func joinConfig(opts *options.Options, extraNodeLabels []string) ([]byte, error) {
+	nodeLabelList := []string{
+		"kubernetes.azure.com/managed=false",
+		"kubernetes.azure.com/cluster=" + opts.NodeResourceGroup,
+	}
+	nodeLabelList = append(nodeLabelList, extraNodeLabels...)
+
 	return runtime.Encode(codec, &upstreamv1beta4.JoinConfiguration{
 		Discovery: upstreamv1beta4.Discovery{
 			File: &upstreamv1beta4.FileDiscovery{
@@ -101,7 +113,7 @@ func joinConfig(opts *options.Options) ([]byte, error) {
 			KubeletExtraArgs: []upstreamv1beta4.Arg{
 				{
 					Name:  "node-labels",
-					Value: "kubernetes.azure.com/managed=false,kubernetes.azure.com/cluster=" + opts.NodeResourceGroup,
+					Value: strings.Join(nodeLabelList, ","),
 				},
 			},
 		},

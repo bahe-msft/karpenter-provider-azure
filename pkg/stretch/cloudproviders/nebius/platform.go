@@ -6,6 +6,7 @@ import (
 	"iter"
 
 	"github.com/nebius/gosdk"
+	nebiuscommonv1 "github.com/nebius/gosdk/proto/nebius/common/v1"
 	nebiuscomputev1 "github.com/nebius/gosdk/proto/nebius/compute/v1"
 	"google.golang.org/protobuf/proto"
 	corev1 "k8s.io/api/core/v1"
@@ -174,4 +175,39 @@ func resolvePlatformPresetFromNodeClaim(
 	}
 
 	return nil, fmt.Errorf("no matching platform preset found")
+}
+
+func resolvePlatformPresetFromInstance(
+	ctx context.Context,
+	projectID string,
+	sdk *gosdk.SDK,
+	instance *nebiuscomputev1.Instance,
+) (*platformPreset, error) {
+	platformName := instance.GetSpec().GetResources().GetPlatform()
+	presetName := instance.GetSpec().GetResources().GetPreset()
+
+	getReq := &nebiuscommonv1.GetByNameRequest{
+		ParentId: projectID,
+		Name:     platformName,
+	}
+	platform, err := sdk.Services().Compute().V1().Platform().GetByName(ctx, getReq)
+	if err != nil {
+		return nil, fmt.Errorf("get platform %q: %w", platformName, err)
+	}
+
+	var preset *nebiuscomputev1.Preset
+	for _, p := range platform.GetSpec().GetPresets() {
+		if p.GetName() == presetName {
+			preset = p
+			break
+		}
+	}
+	if preset == nil {
+		return nil, fmt.Errorf("preset %q not found in platform %q", presetName, platformName)
+	}
+
+	return &platformPreset{
+		platform: platform,
+		preset:   preset,
+	}, nil
 }

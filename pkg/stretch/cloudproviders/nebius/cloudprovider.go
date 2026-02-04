@@ -2,24 +2,47 @@ package nebius
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
+	"strings"
+	"time"
 
 	"github.com/awslabs/operatorpkg/status"
 	"github.com/nebius/gosdk"
+	"github.com/samber/lo"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	v1 "sigs.k8s.io/karpenter/pkg/apis/v1"
 	corecloudprovider "sigs.k8s.io/karpenter/pkg/cloudprovider"
+	"sigs.k8s.io/karpenter/pkg/scheduling"
 
 	"github.com/Azure/karpenter-provider-azure/pkg/apis"
 	"github.com/Azure/karpenter-provider-azure/pkg/apis/v1beta1"
+	labelspkg "github.com/Azure/karpenter-provider-azure/pkg/providers/labels"
 	"github.com/Azure/karpenter-provider-azure/pkg/stretch/cloudproviders"
 	"github.com/Azure/karpenter-provider-azure/pkg/stretch/options"
 	"github.com/Azure/karpenter-provider-azure/pkg/utils"
 )
+
+const (
+	providerScheme           = "stretch-nebius"
+	providerIDInstancePrefix = providerScheme + "://instance/"
+)
+
+func vmInstanceProviderID(instanceID string) string {
+	return providerIDInstancePrefix + instanceID
+}
+
+func providerIDToInstanceID(providerID string) (string, error) {
+	prefix := providerIDInstancePrefix
+	if !strings.HasPrefix(providerID, prefix) {
+		return "", fmt.Errorf("invalid providerID scheme, expected prefix %q", prefix)
+	}
+	instanceID := strings.TrimPrefix(providerID, prefix)
+
+	return instanceID, nil
+}
 
 type CloudProvider struct {
 	sdk        *gosdk.SDK
@@ -90,7 +113,10 @@ func (c *CloudProvider) Create(ctx context.Context, nodeClaim *v1.NodeClaim) (*v
 	if err != nil {
 		return nil, err
 	}
-	logger.Info("resolved platform preset for launching instance", "platformPreset", platformPresetToLaunch.InstanceTypeName())
+	logger.Info(
+		"resolved platform preset for launching instance",
+		"platformPreset", platformPresetToLaunch.InstanceTypeName(),
+	)
 
 	// launch nebius instance
 	instanceConfig, err := newVMInstanceConfig(
@@ -103,23 +129,68 @@ func (c *CloudProvider) Create(ctx context.Context, nodeClaim *v1.NodeClaim) (*v
 	if err != nil {
 		return nil, err
 	}
-	instance := newVMInstance(instanceConfig, c.sdk)
-	_ = instance
 
-	b, _ := json.MarshalIndent(instanceConfig, "", "  ")
-	fmt.Println("instanceConfig:\n", string(b))
+	launchInstancePromise, err := launchVMInstance(c.kubeClient, nodeClaim, c.sdk, instanceConfig)
+	if err != nil {
+		return nil, fmt.Errorf("launching VM instance: %w", err)
+	}
+	go func() {
+		err := launchInstancePromise.Wait()
+		if err == nil {
+			// no need to clean up
+			return
+		}
 
-	// populate nodeClaim status to bookkeep the created VM (provider ID)
+		// FIXME: wait for node claim is set with launched condition
 
-	panic("create unimplemented")
+		logger.Error(err, "failed to launch nebius VM, cleaning up")
+		cleanUpCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
+		if err := launchInstancePromise.Cleanup(cleanUpCtx); err != nil {
+			logger.Error(err, "failed to clean up nebius VM after launch failure")
+		} else {
+			logger.Info("successfully cleaned up nebius VM after launch failure")
+		}
+	}()
+
+	// rebuild node claim object to reflect the launched instance
+	instance, err := launchInstancePromise.PollInstance(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("polling launched instance: %w", err)
+	}
+	instanceType := platformPresetToLaunch.ToInstanceType()
+
+	newNodeClaim := nodeClaimFromInstance(instance, instanceType)
+	// TODO: figure out meaning
+	newNodeClaim.Labels = lo.Assign(
+		newNodeClaim.Labels,
+		labelspkg.GetWellKnownSingleValuedRequirementLabels(scheduling.NewNodeSelectorRequirementsWithMinValues(nodeClaim.Spec.Requirements...)),
+	)
+
+	return newNodeClaim, nil
 }
 
 func (c *CloudProvider) Delete(ctx context.Context, nodeClaim *v1.NodeClaim) error {
-	panic("delete unimplemented")
+	return deleteVMInstanceByNodeClaim(ctx, c.sdk, nodeClaim)
 }
 
 func (c *CloudProvider) Get(ctx context.Context, providerID string) (*v1.NodeClaim, error) {
-	panic("get unimplemented")
+	instance, err := getVMInstanceByProviderID(ctx, c.sdk, providerID)
+	if err != nil {
+		return nil, err
+	}
+	platformPreset, err := resolvePlatformPresetFromInstance(
+		ctx,
+		options.MustGetNebiusProjectID(ctx), // TODO: maybe resolve from node class?
+		c.sdk,
+		instance,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	nodeClaim := nodeClaimFromInstance(instance, platformPreset.ToInstanceType())
+	return nodeClaim, nil
 }
 
 func (c *CloudProvider) GetInstanceTypes(
@@ -164,7 +235,8 @@ func (c *CloudProvider) GetSupportedNodeClasses() []status.Object {
 }
 
 func (c *CloudProvider) IsDrifted(ctx context.Context, nodeClaim *v1.NodeClaim) (corecloudprovider.DriftReason, error) {
-	panic("isDrifted unimplemented")
+	// TODO: implement drift detection
+	return "", nil
 }
 
 func (c *CloudProvider) List(ctx context.Context) ([]*v1.NodeClaim, error) {
