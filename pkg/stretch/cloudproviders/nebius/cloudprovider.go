@@ -8,6 +8,7 @@ import (
 
 	"github.com/awslabs/operatorpkg/status"
 	"github.com/nebius/gosdk"
+	nebiuscomputev1 "github.com/nebius/gosdk/proto/nebius/compute/v1"
 	"github.com/samber/lo"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/rest"
@@ -28,6 +29,10 @@ import (
 const (
 	providerScheme           = "stretch-nebius"
 	providerIDInstancePrefix = providerScheme + "://instance/"
+
+	resourceLabelKeyManagedBy   = "karpenter.azure.com/managed-by"
+	resourceLabelValueManagedBy = "stretch-nebius"
+	resourceLabelKeyOwnedBy     = "karpenter.azure.com/owned-by"
 )
 
 func vmInstanceProviderID(instanceID string) string {
@@ -240,8 +245,38 @@ func (c *CloudProvider) IsDrifted(ctx context.Context, nodeClaim *v1.NodeClaim) 
 }
 
 func (c *CloudProvider) List(ctx context.Context) ([]*v1.NodeClaim, error) {
-	// TODO: list nebius VMs and map to NodeClaims
-	return []*v1.NodeClaim{}, nil
+	var rv []*v1.NodeClaim
+
+	projectID := options.MustGetNebiusProjectID(ctx) // TODO: maybe resolve from node class?
+	instanceService := c.sdk.Services().Compute().V1().Instance()
+	listReq := &nebiuscomputev1.ListInstancesRequest{
+		ParentId: projectID,
+	}
+	for instance, err := range instanceService.Filter(ctx, listReq) {
+		if err != nil {
+			return nil, err
+		}
+		if !isManagedResource(ctx, instance.GetMetadata()) {
+			continue
+		}
+
+		// FIXME: don't do this n+1 lookup
+		// cache platform preset results
+		platformPreset, err := resolvePlatformPresetFromInstance(
+			ctx,
+			projectID,
+			c.sdk,
+			instance,
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		nodeClaim := nodeClaimFromInstance(instance, platformPreset.ToInstanceType())
+		rv = append(rv, nodeClaim)
+	}
+
+	return rv, nil
 }
 
 func (c *CloudProvider) Name() string {

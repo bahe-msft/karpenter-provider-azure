@@ -35,6 +35,7 @@ const instanceNamePrefix = "stretch-nebius-"
 
 type vmInstanceConfig struct {
 	ProjectID     string
+	ClusterID     string // AKS cluster id
 	InstanceName  string
 	Platform      string // e.g., "cpu-d3", "cpu-e2"
 	Preset        string // e.g., "4vcpu-16gb"
@@ -65,6 +66,7 @@ func newVMInstanceConfig(
 
 	rv := &vmInstanceConfig{
 		ProjectID: stretchoptions.MustGetNebiusProjectID(ctx), // FIXME: maybe resolve from node class?
+		ClusterID: karpOpts.ClusterID,
 		// FIXME: confirm naming pattern in nebius side
 		InstanceName: fmt.Sprintf("%s%s", instanceNamePrefix, nodeClaim.Name),
 		Platform:     platformPreset.platform.GetMetadata().GetName(),
@@ -100,6 +102,10 @@ func (i *vmInstance) resolveBootDiskMetadata() *nebiuscommonv1.ResourceMetadata 
 	return &nebiuscommonv1.ResourceMetadata{
 		ParentId: i.config.ProjectID,
 		Name:     fmt.Sprintf("%s-boot-disk", i.config.InstanceName),
+		Labels: map[string]string{
+			resourceLabelKeyManagedBy: resourceLabelValueManagedBy,
+			resourceLabelKeyOwnedBy:   i.config.ClusterID,
+		},
 	}
 }
 
@@ -107,6 +113,10 @@ func (i *vmInstance) resolveInstanceMetadata() *nebiuscommonv1.ResourceMetadata 
 	return &nebiuscommonv1.ResourceMetadata{
 		ParentId: i.config.ProjectID,
 		Name:     i.config.InstanceName,
+		Labels: map[string]string{
+			resourceLabelKeyManagedBy: resourceLabelValueManagedBy,
+			resourceLabelKeyOwnedBy:   i.config.ClusterID,
+		},
 	}
 }
 
@@ -582,4 +592,18 @@ func nodeClaimFromInstance(
 	// TODO: labels from instance
 
 	return rv
+}
+
+func isManagedResource(
+	ctx context.Context,
+	md *nebiuscommonv1.ResourceMetadata,
+) bool {
+	labels := md.GetLabels()
+	clusterID := options.FromContext(ctx).ClusterID // FIXME: this pattern is not great
+	if labels[resourceLabelKeyManagedBy] == resourceLabelValueManagedBy &&
+		labels[resourceLabelKeyOwnedBy] == clusterID {
+		return true
+	}
+
+	return false
 }
