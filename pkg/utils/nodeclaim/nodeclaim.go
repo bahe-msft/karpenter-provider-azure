@@ -24,6 +24,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	karpv1 "sigs.k8s.io/karpenter/pkg/apis/v1"
 
 	armcompute "github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v7"
@@ -32,6 +33,23 @@ import (
 	"github.com/Azure/karpenter-provider-azure/pkg/providers/instance"
 	"github.com/Azure/karpenter-provider-azure/pkg/utils"
 )
+
+func UsingAKSNodeClass(nodeClaim *karpv1.NodeClaim) bool {
+	if nodeClaim.Spec.NodeClassRef == nil {
+		return false
+	}
+	return nodeClaim.Spec.NodeClassRef.Kind == "AKSNodeClass"
+}
+
+func UsingAKSNodeClassPredicate() predicate.Funcs {
+	return predicate.NewPredicateFuncs(func(object client.Object) bool {
+		nodeClaim, ok := object.(*karpv1.NodeClaim)
+		if !ok {
+			return false
+		}
+		return UsingAKSNodeClass(nodeClaim)
+	})
+}
 
 // GetAKSNodeClass resolves the AKSNodeClass from the NodeClaim's NodeClassRef.
 // If the NodeClass for the nodeClaim has DeletionTimestamp set, an error is returned.
