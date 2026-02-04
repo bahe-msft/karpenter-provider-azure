@@ -66,8 +66,11 @@ func (d *DelegatedCloudProvider) Get(ctx context.Context, providerID string) (*v
 		if err == nil && nodeClaim != nil {
 			return nodeClaim, nil
 		}
+		if cloudprovider.IsNodeClaimNotFoundError(err) {
+			return nil, err
+		}
 	}
-	return nil, fmt.Errorf("unsupported provider id: %q", providerID)
+	return nil, cloudprovider.NewNodeClaimNotFoundError(fmt.Errorf("provider id %q not found", providerID))
 }
 
 func (d *DelegatedCloudProvider) GetInstanceTypes(ctx context.Context, nodePool *v1.NodePool) ([]*cloudprovider.InstanceType, error) {

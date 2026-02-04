@@ -15,6 +15,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	v1 "sigs.k8s.io/karpenter/pkg/apis/v1"
+	"sigs.k8s.io/karpenter/pkg/cloudprovider"
 	corecloudprovider "sigs.k8s.io/karpenter/pkg/cloudprovider"
 	"sigs.k8s.io/karpenter/pkg/scheduling"
 
@@ -191,6 +192,9 @@ func (c *CloudProvider) Get(ctx context.Context, providerID string) (*v1.NodeCla
 		instance,
 	)
 	if err != nil {
+		if isNotFound(err) {
+			return nil, cloudprovider.NewNodeClaimNotFoundError(err)
+		}
 		return nil, err
 	}
 
