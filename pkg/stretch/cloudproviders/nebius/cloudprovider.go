@@ -1,0 +1,258 @@
+package nebius
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/awslabs/operatorpkg/status"
+	"github.com/nebius/gosdk"
+	nebiuscomputev1 "github.com/nebius/gosdk/proto/nebius/compute/v1"
+	"github.com/samber/lo"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/rest"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
+	v1 "sigs.k8s.io/karpenter/pkg/apis/v1"
+	"sigs.k8s.io/karpenter/pkg/cloudprovider"
+	corecloudprovider "sigs.k8s.io/karpenter/pkg/cloudprovider"
+	"sigs.k8s.io/karpenter/pkg/scheduling"
+
+	"github.com/Azure/karpenter-provider-azure/pkg/apis"
+	"github.com/Azure/karpenter-provider-azure/pkg/apis/v1beta1"
+	labelspkg "github.com/Azure/karpenter-provider-azure/pkg/providers/labels"
+	"github.com/Azure/karpenter-provider-azure/pkg/stretch/cloudproviders"
+	"github.com/Azure/karpenter-provider-azure/pkg/stretch/options"
+	"github.com/Azure/karpenter-provider-azure/pkg/utils"
+)
+
+type CloudProvider struct {
+	sdk        *gosdk.SDK
+	kubeClient client.Client
+	restConfig *rest.Config
+}
+
+var _ corecloudprovider.CloudProvider = (*CloudProvider)(nil)
+
+func new(
+	sdk *gosdk.SDK,
+	kubeClient client.Client,
+	restConfig *rest.Config,
+) *CloudProvider {
+	return &CloudProvider{
+		sdk:        sdk,
+		kubeClient: kubeClient,
+		restConfig: restConfig,
+	}
+}
+
+func Register(
+	d *cloudproviders.DelegatedCloudProvider,
+	sdk *gosdk.SDK,
+	kubeClient client.Client,
+	restConfig *rest.Config,
+) {
+	d.RegisterKind("StretchNebiusNodeClass", new(sdk, kubeClient, restConfig))
+}
+
+func (c *CloudProvider) getNodeClass( // TODO: make it reusable
+	ctx context.Context,
+	nodeClaim *v1.NodeClaim,
+) (*v1beta1.StretchNebiusNodeClass, error) {
+	if nodeClaim.Spec.NodeClassRef == nil {
+		return nil, fmt.Errorf("nodeClaim %s does not have a nodeClassRef", nodeClaim.Name)
+	}
+
+	rv := &v1beta1.StretchNebiusNodeClass{}
+	if err := c.kubeClient.Get(ctx, client.ObjectKey{Name: nodeClaim.Spec.NodeClassRef.Name}, rv); err != nil {
+		return nil, fmt.Errorf("getting StretchNebiusNodeClass %s: %w", nodeClaim.Spec.NodeClassRef.Name, err)
+	}
+
+	if !rv.DeletionTimestamp.IsZero() {
+		return nil, utils.NewTerminatingResourceError(schema.GroupResource{Group: apis.Group, Resource: "nebiusnodeclass"}, rv.Name)
+	}
+
+	return rv, nil
+}
+
+func (c *CloudProvider) Create(ctx context.Context, nodeClaim *v1.NodeClaim) (*v1.NodeClaim, error) {
+	logger := log.FromContext(ctx).WithValues("nodeClaim", nodeClaim.Name)
+	logger.Info("creating nebius VM for nodeClaim")
+
+	nodeClass, err := c.getNodeClass(ctx, nodeClaim)
+	if err != nil {
+		// FIXME: proper error attribution
+		return nil, err
+	}
+
+	// resolve instance type to use based on pricing/offerings
+	platformPresetToLaunch, err := resolvePlatformPresetFromNodeClaim(
+		ctx,
+		options.MustGetNebiusProjectID(ctx), // TODO: maybe resolve from node class?
+		c.sdk,
+		nodeClaim,
+	)
+	if err != nil {
+		return nil, err
+	}
+	logger.Info(
+		"resolved platform preset for launching instance",
+		"platformPreset", platformPresetToLaunch.InstanceTypeName(),
+	)
+
+	// launch nebius instance
+	instanceConfig, err := newVMInstanceConfig(
+		ctx,
+		nodeClass,
+		nodeClaim,
+		platformPresetToLaunch,
+		c.restConfig,
+	)
+	if err != nil {
+		return nil, err
+	}
+	op := newVMInstanceOperator(logger, c.sdk, instanceConfig)
+
+	if err := op.LaunchInBackground(ctx, c.kubeClient, nodeClaim); err != nil {
+		logger.Error(err, "failed to launch nebius VM")
+		return nil, err
+	}
+	launchedInstance, err := op.WaitUntilAcceptedByRemote(ctx)
+	if err != nil {
+		logger.Error(err, "wait for nebius VM launch failed")
+		return nil, err
+	}
+
+	// rebuild node claim object to reflect the launched instance
+	newNodeClaim := nodeClaimFromInstance(launchedInstance, platformPresetToLaunch.ToInstanceType())
+	// TODO: figure out meaning
+	newNodeClaim.Labels = lo.Assign(
+		newNodeClaim.Labels,
+		labelspkg.GetWellKnownSingleValuedRequirementLabels(scheduling.NewNodeSelectorRequirementsWithMinValues(nodeClaim.Spec.Requirements...)),
+	)
+
+	return newNodeClaim, nil
+}
+
+func (c *CloudProvider) Delete(ctx context.Context, nodeClaim *v1.NodeClaim) error {
+	logger := log.FromContext(ctx).WithValues("nodeClaim", nodeClaim.Name)
+	providerID := nodeClaim.Status.ProviderID
+	if providerID == "" {
+		logger.V(5).Info("nodeClaim has no providerID, skipping deletion")
+		return nil
+	}
+	logger = logger.WithValues("providerID", providerID)
+
+	return deleteVMInstanceByProviderID(ctx, logger, c.sdk, providerID)
+}
+
+func (c *CloudProvider) Get(ctx context.Context, providerID string) (*v1.NodeClaim, error) {
+	instance, err := getVMInstanceByProviderID(ctx, c.sdk, providerID)
+	if err != nil {
+		return nil, err
+	}
+	platformPreset, err := resolvePlatformPresetFromInstance(
+		ctx,
+		options.MustGetNebiusProjectID(ctx), // TODO: maybe resolve from node class?
+		c.sdk,
+		instance,
+	)
+	if err != nil {
+		if isNotFound(err) {
+			// return NodeClaimNotFoundError to signal deletion later
+			return nil, cloudprovider.NewNodeClaimNotFoundError(err)
+		}
+		return nil, err
+	}
+
+	nodeClaim := nodeClaimFromInstance(instance, platformPreset.ToInstanceType())
+	return nodeClaim, nil
+}
+
+func (c *CloudProvider) GetInstanceTypes(
+	ctx context.Context,
+	nodePool *v1.NodePool,
+) ([]*corecloudprovider.InstanceType, error) {
+	// TODO: proper caching design
+
+	projectID := options.MustGetNebiusProjectID(ctx) // TODO: maybe resolve from node class?
+	logger := log.FromContext(ctx).
+		WithName("nebius-cloud-provider").
+		WithValues("nebius.project-id", projectID)
+
+	var rv []*corecloudprovider.InstanceType
+	for platformPreset, err := range filterPlatformPresets(ctx, projectID, c.sdk) {
+		if err != nil {
+			return nil, fmt.Errorf("filter supported platforms from %q: %w", projectID, err)
+		}
+		platform := platformPreset.platform
+		preset := platformPreset.preset
+		logger.V(8).Info(
+			"found nebius platform preset",
+			"platform.id", platform.GetMetadata().GetId(),
+			"platform.name", platform.GetMetadata().GetName(),
+			"platform.human_readable_name", platform.GetSpec().GetHumanReadableName(),
+			"preset.name", preset.GetName(),
+			"preset.vcpu_count", preset.GetResources().GetVcpuCount(),
+			"preset.memory_gb", preset.GetResources().GetMemoryGibibytes(),
+			"preset.gpu_count", preset.GetResources().GetGpuCount(),
+		)
+
+		rv = append(rv, platformPreset.ToInstanceType())
+	}
+
+	return rv, nil
+}
+
+func (c *CloudProvider) GetSupportedNodeClasses() []status.Object {
+	return []status.Object{
+		&v1beta1.StretchNebiusNodeClass{},
+	}
+}
+
+func (c *CloudProvider) IsDrifted(ctx context.Context, nodeClaim *v1.NodeClaim) (corecloudprovider.DriftReason, error) {
+	// TODO: implement drift detection
+	return "", nil
+}
+
+func (c *CloudProvider) List(ctx context.Context) ([]*v1.NodeClaim, error) {
+	var rv []*v1.NodeClaim
+
+	projectID := options.MustGetNebiusProjectID(ctx) // TODO: maybe resolve from node class?
+	instanceService := c.sdk.Services().Compute().V1().Instance()
+	listReq := &nebiuscomputev1.ListInstancesRequest{
+		ParentId: projectID,
+	}
+	for instance, err := range instanceService.Filter(ctx, listReq) {
+		if err != nil {
+			return nil, err
+		}
+		if !isManagedResource(ctx, instance.GetMetadata()) {
+			continue
+		}
+
+		// FIXME: don't do this n+1 lookup
+		// cache platform preset results
+		platformPreset, err := resolvePlatformPresetFromInstance(
+			ctx,
+			projectID,
+			c.sdk,
+			instance,
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		nodeClaim := nodeClaimFromInstance(instance, platformPreset.ToInstanceType())
+		rv = append(rv, nodeClaim)
+	}
+
+	return rv, nil
+}
+
+func (c *CloudProvider) Name() string {
+	return "azure-stretch-nebius"
+}
+
+func (c *CloudProvider) RepairPolicies() []corecloudprovider.RepairPolicy {
+	return nil
+}

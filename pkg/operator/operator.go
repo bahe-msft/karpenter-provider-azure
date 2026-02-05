@@ -131,8 +131,16 @@ func NewOperator(ctx context.Context, operator *operator.Operator) (context.Cont
 		options.FromContext(ctx).VnetGUID = vnetGUID
 	}
 
+	var inClusterConfig *rest.Config
+	if v, err := rest.InClusterConfig(); err == nil {
+		inClusterConfig = v
+	} else {
+		// Fallback to operator config if not running in cluster
+		inClusterConfig = operator.GetConfig()
+		log.FromContext(ctx).V(0).Info("falling back to operator REST config for in-cluster Kubernetes interface")
+	}
+
 	// These options are set similarly to those used by operator.KubernetesInterface
-	inClusterConfig := lo.Must(rest.InClusterConfig())
 	inClusterConfig.RateLimiter = flowcontrol.NewTokenBucketRateLimiter(float32(coreoptions.FromContext(ctx).KubeClientQPS), coreoptions.FromContext(ctx).KubeClientBurst)
 	inClusterConfig.UserAgent = auth.GetUserAgentExtension()
 	inClusterClient := kubernetes.NewForConfigOrDie(inClusterConfig)
@@ -301,6 +309,7 @@ func WaitForCRDs(ctx context.Context, timeout time.Duration, config *rest.Config
 		gvk(&karpv1.NodePool{}),
 		gvk(&karpv1.NodeClaim{}),
 		gvk(&v1beta1.AKSNodeClass{}),
+		gvk(&v1beta1.StretchNebiusNodeClass{}),
 	}
 
 	client, err := rest.HTTPClientFor(config)

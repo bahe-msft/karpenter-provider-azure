@@ -1,0 +1,19 @@
+#cloud-config
+apt:
+  sources:
+    kubernetes:
+      source: deb https://pkgs.k8s.io/core:/stable:/v1.33/deb/ /
+      keyid: DE15B14486CD377B9E876E1A234654DA9A296436  # curl -sL https://pkgs.k8s.io/core:/stable:/v1.33/deb/Release.key | gpg --show-keys
+package_update: true
+package_upgrade: true
+packages:
+- containerd
+- kubeadm
+- kubelet
+runcmd:
+- |
+  set -e
+
+  mkdir /etc/containerd
+  containerd config default | sed -e '/SystemdCgroup/ s/false/true/' >/etc/containerd/config.toml
+  systemctl restart containerd.service

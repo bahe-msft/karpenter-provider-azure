@@ -30,6 +30,8 @@ var (
 		scheme.AddKnownTypes(SchemeGroupVersion,
 			&AKSNodeClass{},
 			&AKSNodeClassList{},
+			&StretchNebiusNodeClass{},
+			&StretchNebiusNodeClassList{},
 		)
 		metav1.AddToGroupVersion(scheme, SchemeGroupVersion)
 		return nil

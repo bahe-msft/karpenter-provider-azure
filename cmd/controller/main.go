@@ -25,6 +25,12 @@ import (
 	"github.com/Azure/karpenter-provider-azure/pkg/cloudprovider"
 	"github.com/Azure/karpenter-provider-azure/pkg/controllers"
 	"github.com/Azure/karpenter-provider-azure/pkg/operator"
+
+	stretchcloudproviders "github.com/Azure/karpenter-provider-azure/pkg/stretch/cloudproviders"
+	stretchnebiuscloudprovider "github.com/Azure/karpenter-provider-azure/pkg/stretch/cloudproviders/nebius"
+	stretchcontrollers "github.com/Azure/karpenter-provider-azure/pkg/stretch/controllers"
+	stretchoptions "github.com/Azure/karpenter-provider-azure/pkg/stretch/options"
+
 	"github.com/go-logr/zapr"
 	"github.com/samber/lo"
 
@@ -62,10 +68,19 @@ func main() {
 
 	lo.Must0(op.AddHealthzCheck("cloud-provider", aksCloudProvider.LivenessProbe))
 
-	overlayUndecoratedCloudProvider := metrics.Decorate(aksCloudProvider)
-	cloudProvider := overlay.Decorate(overlayUndecoratedCloudProvider, op.GetClient(), op.InstanceTypeStore)
-	clusterState := state.NewCluster(op.Clock, op.GetClient(), cloudProvider)
+	delegatedCloudProvider := stretchcloudproviders.New(aksCloudProvider)
 
+	// nebius cloud provider
+	{
+		nebiusSDK := stretchoptions.MustNewNebiusSDK(ctx)
+		defer nebiusSDK.Close()
+		stretchnebiuscloudprovider.Register(delegatedCloudProvider, nebiusSDK, op.GetClient(), op.GetConfig())
+	}
+
+	overlayUndecoratedCloudProvider := metrics.Decorate(delegatedCloudProvider)
+	cloudProvider := overlay.Decorate(overlayUndecoratedCloudProvider, op.GetClient(), op.InstanceTypeStore)
+
+	clusterState := state.NewCluster(op.Clock, op.GetClient(), cloudProvider)
 	op.
 		WithControllers(ctx, corecontrollers.NewControllers(
 			ctx,
@@ -90,6 +105,11 @@ func main() {
 			op.ImageProvider,
 			op.InClusterKubernetesInterface,
 			op.AZClient.SubnetsClient(),
+		)...).
+		WithControllers(ctx, stretchcontrollers.NewControllers(
+			ctx,
+			op.GetClient(),
+			op.EventRecorder,
 		)...).
 		Start(ctx)
 }
