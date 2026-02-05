@@ -3,8 +3,6 @@ package nebius
 import (
 	"context"
 	"fmt"
-	"strings"
-	"time"
 
 	"github.com/awslabs/operatorpkg/status"
 	"github.com/nebius/gosdk"
@@ -26,29 +24,6 @@ import (
 	"github.com/Azure/karpenter-provider-azure/pkg/stretch/options"
 	"github.com/Azure/karpenter-provider-azure/pkg/utils"
 )
-
-const (
-	providerScheme           = "stretch-nebius"
-	providerIDInstancePrefix = providerScheme + "://instance/"
-
-	resourceLabelKeyManagedBy   = "karpenter.azure.com/managed-by"
-	resourceLabelValueManagedBy = "stretch-nebius"
-	resourceLabelKeyOwnedBy     = "karpenter.azure.com/owned-by"
-)
-
-func vmInstanceProviderID(instanceID string) string {
-	return providerIDInstancePrefix + instanceID
-}
-
-func providerIDToInstanceID(providerID string) (string, error) {
-	prefix := providerIDInstancePrefix
-	if !strings.HasPrefix(providerID, prefix) {
-		return "", fmt.Errorf("invalid providerID scheme, expected prefix %q", prefix)
-	}
-	instanceID := strings.TrimPrefix(providerID, prefix)
-
-	return instanceID, nil
-}
 
 type CloudProvider struct {
 	sdk        *gosdk.SDK
@@ -135,38 +110,20 @@ func (c *CloudProvider) Create(ctx context.Context, nodeClaim *v1.NodeClaim) (*v
 	if err != nil {
 		return nil, err
 	}
+	op := newVMInstanceOperator(logger, c.sdk, instanceConfig)
 
-	launchInstancePromise, err := launchVMInstance(c.kubeClient, nodeClaim, c.sdk, instanceConfig)
-	if err != nil {
-		return nil, fmt.Errorf("launching VM instance: %w", err)
+	if err := op.LaunchInBackground(c.kubeClient, nodeClaim); err != nil {
+		logger.Error(err, "failed to launch nebius VM")
+		return nil, err
 	}
-	go func() {
-		err := launchInstancePromise.Wait()
-		if err == nil {
-			// no need to clean up
-			return
-		}
-
-		// FIXME: wait for node claim is set with launched condition
-
-		logger.Error(err, "failed to launch nebius VM, cleaning up")
-		cleanUpCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-		defer cancel()
-		if err := launchInstancePromise.Cleanup(cleanUpCtx); err != nil {
-			logger.Error(err, "failed to clean up nebius VM after launch failure")
-		} else {
-			logger.Info("successfully cleaned up nebius VM after launch failure")
-		}
-	}()
+	launchedInstance, err := op.WaitUntilAcceptedByRemote(ctx)
+	if err != nil {
+		logger.Error(err, "wait for nebius VM launch failed")
+		return nil, err
+	}
 
 	// rebuild node claim object to reflect the launched instance
-	instance, err := launchInstancePromise.PollInstance(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("polling launched instance: %w", err)
-	}
-	instanceType := platformPresetToLaunch.ToInstanceType()
-
-	newNodeClaim := nodeClaimFromInstance(instance, instanceType)
+	newNodeClaim := nodeClaimFromInstance(launchedInstance, platformPresetToLaunch.ToInstanceType())
 	// TODO: figure out meaning
 	newNodeClaim.Labels = lo.Assign(
 		newNodeClaim.Labels,
@@ -177,7 +134,15 @@ func (c *CloudProvider) Create(ctx context.Context, nodeClaim *v1.NodeClaim) (*v
 }
 
 func (c *CloudProvider) Delete(ctx context.Context, nodeClaim *v1.NodeClaim) error {
-	return deleteVMInstanceByNodeClaim(ctx, c.sdk, nodeClaim)
+	logger := log.FromContext(ctx).WithValues("nodeClaim", nodeClaim.Name)
+	providerID := nodeClaim.Status.ProviderID
+	if providerID == "" {
+		logger.V(5).Info("nodeClaim has no providerID, skipping deletion")
+		return nil
+	}
+	logger = logger.WithValues("providerID", providerID)
+
+	return deleteVMInstanceByProviderID(ctx, logger, c.sdk, providerID)
 }
 
 func (c *CloudProvider) Get(ctx context.Context, providerID string) (*v1.NodeClaim, error) {
@@ -193,6 +158,7 @@ func (c *CloudProvider) Get(ctx context.Context, providerID string) (*v1.NodeCla
 	)
 	if err != nil {
 		if isNotFound(err) {
+			// return NodeClaimNotFoundError to signal deletion later
 			return nil, cloudprovider.NewNodeClaimNotFoundError(err)
 		}
 		return nil, err
