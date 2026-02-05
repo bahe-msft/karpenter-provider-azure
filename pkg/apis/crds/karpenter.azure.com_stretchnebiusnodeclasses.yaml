@@ -50,6 +50,9 @@ spec:
             type: object
           spec:
             properties:
+              allocateNodePublicIP:
+                default: false
+                type: boolean
               osDiskImageFamily:
                 default: ubuntu24.04-driverless
                 type: string

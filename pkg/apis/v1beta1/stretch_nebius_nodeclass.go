@@ -56,6 +56,10 @@ type StretchNebiusNodeClassSpec struct {
 	// +optional
 	OSDiskImageFamily *string `json:"osDiskImageFamily,omitempty"`
 
+	// +default=false
+	// +optional
+	AllocateNodePublicIP *bool `json:"allocateNodePublicIP,omitempty"`
+
 	// TODO: other fields (kublet etc)
 }
 
