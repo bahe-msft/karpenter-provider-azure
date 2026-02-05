@@ -356,11 +356,14 @@ func (i *vmInstanceOperator) Cleanup(ctx context.Context) error {
 }
 
 func (i *vmInstanceOperator) LaunchInBackground(
+	ctx context.Context,
 	kubeClient client.Client,
 	nodeClaim *v1.NodeClaim,
 ) error {
+	ctx = context.WithoutCancel(ctx) // to copy existing context values without inheriting cancellation
+
 	cleanUpBestEffort := func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 		defer cancel()
 
 		// TODO: confirm if we need to wait until node claim is being set with launched condition
@@ -397,7 +400,7 @@ func (i *vmInstanceOperator) LaunchInBackground(
 			}
 		}()
 
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+		ctx, cancel := context.WithTimeout(ctx, 15*time.Minute)
 		defer cancel()
 
 		op, err := i.Launch(ctx)

@@ -112,7 +112,7 @@ func (c *CloudProvider) Create(ctx context.Context, nodeClaim *v1.NodeClaim) (*v
 	}
 	op := newVMInstanceOperator(logger, c.sdk, instanceConfig)
 
-	if err := op.LaunchInBackground(c.kubeClient, nodeClaim); err != nil {
+	if err := op.LaunchInBackground(ctx, c.kubeClient, nodeClaim); err != nil {
 		logger.Error(err, "failed to launch nebius VM")
 		return nil, err
 	}
